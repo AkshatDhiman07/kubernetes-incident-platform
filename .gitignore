@@ -26,3 +26,7 @@ venv/
 # OneDrive
 Icon?
 .DS_Store
+
+# Saved Terraform plans
+tfplan*
+*.tfplan
