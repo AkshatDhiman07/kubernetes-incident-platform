@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: load-generator
+  namespace: default
+  labels:
+    app: load-generator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: load-generator
+  template:
+    metadata:
+      labels:
+        app: load-generator
+    spec:
+      containers:
+      - name: load-generator
+        image: 136492549275.dkr.ecr.us-east-1.amazonaws.com/load-generator:v0.1.0
+        env:
+        - name: ORDER_SERVICE_URL
+          value: "http://order-service.default.svc.cluster.local"
+        - name: RATE_PER_SEC
+          value: "5"
+        resources:
+          requests:
+            memory: "32Mi"
+            cpu: "20m"
+          limits:
+            memory: "64Mi"
+            cpu: "100m"
