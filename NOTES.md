@@ -46,3 +46,38 @@
 **Destroyed at EOD ✓** (and SET THE ALARM)
 
 **Tomorrow (Day 6):** Fix Terraform EKS scaling drift, set up Helm-based ArgoCD App for ArgoCD itself ("App of Apps" pattern), start payment-service demo app
+
+### Day 6 (Jun 1, Mon) — biggest session yet
+**Rebuilt with bigger nodes:**
+- Upgraded eks.tf to t3.medium (17 pods/node vs t3.small's 11)
+- Added update_config to allow Terraform to update node group scaling
+- Fresh apply: VPC + EKS in ~15 min
+
+**Phase 1 — Observability bootstrap:**
+- ArgoCD reinstalled, 4 Apps re-bootstrapped from git
+- kube-prometheus-stack via Helm with sized resource limits
+- All node-exporters running this time (no pod limit wall)
+- Verified app metrics with payment-service v0.2.0 (prometheus-fastapi-instrumentator)
+- Wrote 6 alert rules across payment + order services
+- Discovered `up == 0` doesn't fire when target absent → use `absent()`
+
+**Phase 2 — Logs:**
+- Installed Loki SingleBinary mode via Helm
+- Hit EBS CSI driver missing — installed it with IRSA setup
+- Promtail DaemonSet shipping logs to Loki
+- Grafana datasource configured, LogQL queries working
+
+**Phase 3 — Failure injection:**
+- payment-service v0.3.0 with FAILURE_MODE env var
+- Modes: none, slow, errors, crash_loop
+- Tested errors mode → PaymentServiceHighErrorRate fired as expected
+
+**Issues hit (all resolved):**
+- EKS module ignored desired_size again (still on radar to fix properly)
+- Loki PVC stuck Pending → missing EBS CSI driver (gotcha)
+- ArgoCD selfHeal reverted kubectl scale → had to test failures via git
+- Git Bash file:// path mismatch with aws CLI → cygpath fix
+
+**Destroyed at EOD ✓**
+
+**Status: ~80% of infrastructure done. Next: incident response service (the AI piece).**
