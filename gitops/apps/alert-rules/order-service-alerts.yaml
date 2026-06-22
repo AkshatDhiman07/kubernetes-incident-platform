@@ -11,7 +11,7 @@ spec:
     interval: 30s
     rules:
     - alert: OrderServiceDown
-      expr: up{job="order-service"} == 0
+      expr: up{job="order-service"} == 0 or absent(up{job="order-service"})
       for: 1m
       labels:
         severity: critical

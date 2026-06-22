@@ -11,7 +11,7 @@ spec:
     interval: 30s
     rules:
     - alert: PaymentServiceDown
-      expr: up{job="payment-service"} == 0
+      expr: up{job="payment-service"} == 0 or absent(up{job="payment-service"})
       for: 1m
       labels:
         severity: critical
