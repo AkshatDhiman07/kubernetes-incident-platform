@@ -17,13 +17,15 @@ spec:
     spec:
       containers:
       - name: payment-service
-        image: 136492549275.dkr.ecr.us-east-1.amazonaws.com/payment-service:v0.2.0
+        image: 136492549275.dkr.ecr.us-east-1.amazonaws.com/payment-service:v0.3.0
         ports:
         - containerPort: 8080
           name: http
         env:
         - name: APP_VERSION
-          value: "v0.2.0"
+          value: "v0.3.0"
+        - name: FAILURE_MODE
+          value: "none"
         resources:
           requests:
             memory: "96Mi"
