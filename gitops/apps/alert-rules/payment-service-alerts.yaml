@@ -1,0 +1,58 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: payment-service-alerts
+  namespace: default
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+  - name: payment-service.rules
+    interval: 30s
+    rules:
+    - alert: PaymentServiceDown
+      expr: up{job="payment-service"} == 0
+      for: 1m
+      labels:
+        severity: critical
+        service: payment-service
+      annotations:
+        summary: "payment-service is down"
+        description: "No payment-service pods are responding to scrapes."
+
+    - alert: PaymentServiceHighErrorRate
+      expr: |
+        sum(rate(http_requests_total{job="payment-service",status=~"5.."}[2m]))
+        /
+        sum(rate(http_requests_total{job="payment-service"}[2m]))
+        > 0.05
+      for: 2m
+      labels:
+        severity: critical
+        service: payment-service
+      annotations:
+        summary: "payment-service error rate above 5%"
+        description: "More than 5% of requests are returning 5xx."
+
+    - alert: PaymentServiceHighLatency
+      expr: |
+        histogram_quantile(0.95,
+          sum by (le) (rate(http_request_duration_seconds_bucket{job="payment-service"}[5m]))
+        ) > 1
+      for: 3m
+      labels:
+        severity: warning
+        service: payment-service
+      annotations:
+        summary: "payment-service p95 latency above 1 second"
+        description: "p95 latency is degraded for the last 3 minutes."
+
+    - alert: PaymentServicePodRestarting
+      expr: rate(kube_pod_container_status_restarts_total{namespace="default",pod=~"payment-service-.*"}[10m]) > 0
+      for: 5m
+      labels:
+        severity: warning
+        service: payment-service
+      annotations:
+        summary: "payment-service pod is restarting"
+        description: "Pod restart loop detected."

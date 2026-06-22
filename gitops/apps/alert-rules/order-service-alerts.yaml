@@ -1,0 +1,35 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: order-service-alerts
+  namespace: default
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+  - name: order-service.rules
+    interval: 30s
+    rules:
+    - alert: OrderServiceDown
+      expr: up{job="order-service"} == 0
+      for: 1m
+      labels:
+        severity: critical
+        service: order-service
+      annotations:
+        summary: "order-service is down"
+        description: "No order-service pods are responding to scrapes."
+
+    - alert: OrderServiceHighErrorRate
+      expr: |
+        sum(rate(http_requests_total{job="order-service",status=~"5.."}[2m]))
+        /
+        sum(rate(http_requests_total{job="order-service"}[2m]))
+        > 0.10
+      for: 2m
+      labels:
+        severity: critical
+        service: order-service
+      annotations:
+        summary: "order-service error rate above 10%"
+        description: "More than 10% of requests are returning 5xx. Likely a downstream issue with payment-service."
