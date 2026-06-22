@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from prometheus_fastapi_instrumentator import Instrumentator
 from typing import List
 import httpx
 import os
@@ -12,6 +13,9 @@ log = logging.getLogger("order-service")
 PAYMENT_URL = os.getenv("PAYMENT_SERVICE_URL", "http://payment-service.default.svc.cluster.local")
 
 app = FastAPI(title="order-service")
+
+# Expose Prometheus metrics at /metrics
+Instrumentator().instrument(app).expose(app)
 
 class OrderRequest(BaseModel):
     user_id: str
@@ -46,4 +50,4 @@ def create_order(req: OrderRequest):
 
 @app.get("/")
 def root():
-    return {"service": "order-service", "version": os.getenv("APP_VERSION", "v0.1.0")}
+    return {"service": "order-service", "version": os.getenv("APP_VERSION", "v0.2.0")}

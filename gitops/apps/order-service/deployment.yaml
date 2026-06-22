@@ -17,21 +17,21 @@ spec:
     spec:
       containers:
       - name: order-service
-        image: 136492549275.dkr.ecr.us-east-1.amazonaws.com/order-service:v0.1.0
+        image: 136492549275.dkr.ecr.us-east-1.amazonaws.com/order-service:v0.2.0
         ports:
         - containerPort: 8080
           name: http
         env:
         - name: APP_VERSION
-          value: "v0.1.0"
+          value: "v0.2.0"
         - name: PAYMENT_SERVICE_URL
           value: "http://payment-service.default.svc.cluster.local"
         resources:
           requests:
-            memory: "64Mi"
+            memory: "96Mi"
             cpu: "50m"
           limits:
-            memory: "128Mi"
+            memory: "192Mi"
             cpu: "200m"
         livenessProbe:
           httpGet:

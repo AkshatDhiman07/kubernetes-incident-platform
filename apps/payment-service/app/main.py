@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
+from prometheus_fastapi_instrumentator import Instrumentator
 import uuid
 import os
 import logging
@@ -8,6 +9,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("payment-service")
 
 app = FastAPI(title="payment-service")
+
+# Expose Prometheus metrics at /metrics
+Instrumentator().instrument(app).expose(app)
 
 class ChargeRequest(BaseModel):
     user_id: str
@@ -30,4 +34,4 @@ def charge(req: ChargeRequest):
 
 @app.get("/")
 def root():
-    return {"service": "payment-service", "version": os.getenv("APP_VERSION", "v0.1.0")}
+    return {"service": "payment-service", "version": os.getenv("APP_VERSION", "v0.2.0")}
