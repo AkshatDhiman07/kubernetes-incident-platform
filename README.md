@@ -18,53 +18,11 @@ End-to-end latency from alert firing to Slack message is typically under ten sec
 
 ## Architecture
 
-```
-                                 +-----------------+
-   load-generator (5 req/s) ---> |  order-service  |
-                                 +--------+--------+
-                                          |
-                                          v
-                                 +-----------------+
-                                 | payment-service |  <-- FAILURE_MODE env var
-                                 +--------+--------+      injects failures
-                                          |
-                          /metrics scraped every 15s
-                                          |
-                                          v
-                                 +-----------------+
-                                 |   Prometheus    |
-                                 +--------+--------+
-                                          |
-                              alert rule evaluation
-                                          |
-                                          v
-                                 +-----------------+
-                                 |  Alertmanager   |
-                                 +--------+--------+
-                                          |
-                            webhook POST /webhook/alert
-                                          |
-                                          v
-                                 +-----------------+
-                                 | incident-service|
-                                 +--------+--------+
-                                    |     |     |
-                       queries +----+     |     +----+ queries
-                               v          v          v
-                        +--------+   +--------+   (alert metadata)
-                        |Promeths|   |  Loki  |
-                        +--------+   +--------+
-                                          |
-                                          v
-                                 +-----------------+
-                                 |  Claude API     |
-                                 +--------+--------+
-                                          |
-                                          v
-                                 +-----------------+
-                                 |   Slack channel |
-                                 +-----------------+
-```
+## Architecture
+
+<p align="center">
+  <img src="docs/architecture.png" alt="Architecture diagram" width="800">
+</p>
 
 GitOps via ArgoCD watches the `gitops/` folder in this repository. Every change to a microservice manifest, alert rule, or Application definition is reconciled into the cluster automatically. Direct `kubectl apply` is reserved for cluster bootstrap and read-only debugging.
 
