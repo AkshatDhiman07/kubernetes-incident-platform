@@ -18,20 +18,23 @@ module "eks" {
   # Control plane logs to CloudWatch (gives you audit + API server logs)
   cluster_enabled_log_types = ["api", "audit", "authenticator"]
 
-  # Managed node group — Spot for cost
+  # Managed node group — t3.medium Spot for higher pod limit (17/node) and 4GB RAM
   eks_managed_node_groups = {
-    spot = {
-      name = "spot-nodes"
+    main = {
+      name = "main-nodes"
 
-      instance_types = ["t3.small", "t3a.small"]
+      instance_types = ["t3.medium", "t3a.medium"]
       capacity_type  = "SPOT"
 
-      min_size     = 1
-      max_size     = 2
+      min_size     = 2
+      max_size     = 4
       desired_size = 2
 
-      # Use AL2023 (Amazon Linux 2023) — newer default
       ami_type = "AL2023_x86_64_STANDARD"
+
+      update_config = {
+        max_unavailable_percentage = 33
+      }
     }
   }
 
