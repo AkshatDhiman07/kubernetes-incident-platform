@@ -81,3 +81,24 @@
 **Destroyed at EOD ✓**
 
 **Status: ~80% of infrastructure done. Next: incident response service (the AI piece).**
+
+### Day 6 extended (Jun 22) — second session
+**Built tonight:**
+- incident-service v0.1.0 (FastAPI + Prometheus instrumentation)
+- /webhook/alert endpoint receives Alertmanager payloads
+- ECR repo: incident-service
+- K8s manifests + ServiceMonitor
+
+**Wired:**
+- Custom Alertmanager config via secret in monitoring namespace
+- Routes all alerts (except Watchdog/InfoInhibitor null route) to incident-service
+- Verified: real alert (PaymentServiceHighErrorRate) propagated through full chain
+
+**Issues hit:**
+- OIDC changes on cluster recreate broke EBS CSI IAM trust policy
+- ArgoCD apps stuck OutOfSync/Missing because CRDs not installed yet (chicken-egg)
+- Worked around by kubectl apply directly (lost some GitOps purity, acknowledge debt)
+
+**Status:** End-to-end loop proven. Foundation for AI work tomorrow.
+
+**Destroyed at EOD ✓ (very late)**
