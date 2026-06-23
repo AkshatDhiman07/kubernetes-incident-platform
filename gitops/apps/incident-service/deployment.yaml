@@ -15,15 +15,16 @@ spec:
       labels:
         app: incident-service
     spec:
+      serviceAccountName: incident-service
       containers:
       - name: incident-service
-        image: 136492549275.dkr.ecr.us-east-1.amazonaws.com/incident-service:v0.2.2
+        image: 136492549275.dkr.ecr.us-east-1.amazonaws.com/incident-service:v0.3.0
         ports:
         - containerPort: 8080
           name: http
         env:
         - name: APP_VERSION
-          value: "v0.2.2"
+          value: "v0.3.0"
         - name: ANTHROPIC_API_KEY
           valueFrom:
             secretKeyRef:
@@ -38,10 +39,10 @@ spec:
           value: "claude-haiku-4-5-20251001"
         resources:
           requests:
-            memory: "128Mi"
+            memory: "192Mi"
             cpu: "100m"
           limits:
-            memory: "256Mi"
+            memory: "384Mi"
             cpu: "300m"
         livenessProbe:
           httpGet:
