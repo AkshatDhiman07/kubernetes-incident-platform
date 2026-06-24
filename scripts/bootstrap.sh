@@ -2,19 +2,41 @@
 # Bootstrap script for incident platform
 # Run AFTER `terraform apply` completes and 2 nodes are Ready
 # Usage: bash scripts/bootstrap.sh
+#
+# Prerequisites:
+#   - kubectl, helm, aws CLI installed and authenticated
+#   - Secrets folder at ~/.incident-platform-secrets/ with files:
+#       anthropic-key  (your Anthropic API key, no trailing newline)
+#       slack-url      (your Slack webhook URL, no trailing newline)
 set -euo pipefail
 
 CLUSTER_NAME="incident-platform-dev-cluster"
 REGION="us-east-1"
 ACCOUNT_ID="136492549275"
+SECRETS_DIR="$HOME/.incident-platform-secrets"
 
 log() { echo "[$(date +%H:%M:%S)] $*"; }
 
-log "1/8 Wiring kubectl"
+# Pre-flight: verify secrets exist BEFORE doing 20 min of cluster work
+if [ ! -f "$SECRETS_DIR/anthropic-key" ] || [ ! -f "$SECRETS_DIR/slack-url" ]; then
+  log "ERROR: secrets not found in $SECRETS_DIR"
+  log ""
+  log "Create them with:"
+  log "  mkdir -p $SECRETS_DIR && chmod 700 $SECRETS_DIR"
+  log "  printf '%s' 'sk-ant-...' > $SECRETS_DIR/anthropic-key"
+  log "  printf '%s' 'https://hooks.slack.com/services/...' > $SECRETS_DIR/slack-url"
+  log "  chmod 600 $SECRETS_DIR/*"
+  log ""
+  log "Then re-run this script."
+  exit 1
+fi
+log "Pre-flight: secrets folder OK"
+
+log "1/9 Wiring kubectl"
 aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER_NAME"
 kubectl get nodes
 
-log "2/8 Updating EBS CSI driver IAM trust policy for current OIDC"
+log "2/9 Updating EBS CSI driver IAM trust policy for current OIDC"
 NEW_OIDC=$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "$REGION" \
   --query 'cluster.identity.oidc.issuer' --output text | sed 's|https://||')
 log "  OIDC: $NEW_OIDC"
@@ -37,7 +59,7 @@ TRUST
 WIN_PATH=$(cygpath -w ~/csi-trust-policy.json 2>/dev/null || echo ~/csi-trust-policy.json)
 aws iam update-assume-role-policy \
   --role-name AmazonEKS_EBS_CSI_DriverRole \
-  --policy-document "file://$WIN_PATH" || {
+  --policy-document "file://$WIN_PATH" 2>/dev/null || {
     log "  Trust policy update failed; creating role..."
     aws iam create-role --role-name AmazonEKS_EBS_CSI_DriverRole \
       --assume-role-policy-document "file://$WIN_PATH"
@@ -55,10 +77,10 @@ if ! aws iam list-open-id-connect-providers | grep -q "$NEW_OIDC"; then
     --thumbprint-list "$THUMBPRINT" --client-id-list sts.amazonaws.com
 fi
 
-log "3/8 Installing EBS CSI driver addon"
+log "3/9 Installing EBS CSI driver addon"
 aws eks create-addon --cluster-name "$CLUSTER_NAME" --region "$REGION" \
   --addon-name aws-ebs-csi-driver \
-  --service-account-role-arn "arn:aws:iam::${ACCOUNT_ID}:role/AmazonEKS_EBS_CSI_DriverRole" || \
+  --service-account-role-arn "arn:aws:iam::${ACCOUNT_ID}:role/AmazonEKS_EBS_CSI_DriverRole" 2>/dev/null || \
   log "  Addon may already exist; continuing"
 
 log "  Waiting for CSI driver to be ACTIVE..."
@@ -73,7 +95,7 @@ log "  CSI driver: $STATUS"
 kubectl patch storageclass gp2 -p \
   '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
 
-log "4/8 Installing kube-prometheus-stack (creates ServiceMonitor + PrometheusRule CRDs)"
+log "4/9 Installing kube-prometheus-stack (creates ServiceMonitor + PrometheusRule CRDs)"
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts 2>/dev/null || true
 helm repo add grafana https://grafana.github.io/helm-charts 2>/dev/null || true
 helm repo add argo https://argoproj.github.io/argo-helm 2>/dev/null || true
@@ -93,7 +115,7 @@ helm install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
   --set grafana.adminPassword=admin \
   --wait --timeout 5m
 
-log "5/8 Installing Loki + Promtail"
+log "5/9 Installing Loki + Promtail"
 helm install loki grafana/loki --namespace monitoring --version 6.16.0 \
   --set deploymentMode=SingleBinary \
   --set loki.auth_enabled=false \
@@ -117,16 +139,16 @@ helm install promtail grafana/promtail --namespace monitoring --version 6.16.6 \
   --set "config.clients[0].url=http://loki:3100/loki/api/v1/push" \
   --set "tolerations[0].operator=Exists"
 
-log "6/8 Installing ArgoCD"
+log "6/9 Installing ArgoCD"
 kubectl create namespace argocd 2>/dev/null || true
 helm install argocd argo/argo-cd --namespace argocd --version 7.7.0 \
   --set server.service.type=ClusterIP --set dex.enabled=false \
   --wait --timeout 3m
 
-log "7/8 Applying ArgoCD Applications"
+log "7/9 Applying ArgoCD Applications"
 kubectl apply -f gitops/argocd-apps/
 
-log "8/8 Configuring Alertmanager webhook routing"
+log "8/9 Configuring Alertmanager webhook routing"
 cat > ~/alertmanager-config.yaml <<AMEOF
 apiVersion: v1
 kind: Secret
@@ -159,17 +181,32 @@ AMEOF
 kubectl apply -f ~/alertmanager-config.yaml
 kubectl rollout restart statefulset/alertmanager-kube-prometheus-stack-alertmanager -n monitoring
 
+log "9/9 Creating incident-service-secrets from local secrets folder"
+kubectl delete secret incident-service-secrets -n default 2>/dev/null || true
+kubectl create secret generic incident-service-secrets \
+  --namespace=default \
+  --from-file=ANTHROPIC_API_KEY="$SECRETS_DIR/anthropic-key" \
+  --from-file=SLACK_WEBHOOK_URL="$SECRETS_DIR/slack-url"
+
+log "  Secret created. Triggering ArgoCD refresh for incident-service"
+sleep 10
+kubectl patch application incident-service -n argocd --type merge \
+  -p '{"metadata":{"annotations":{"argocd.argoproj.io/refresh":"hard"}}}' 2>/dev/null || \
+  log "  incident-service Application may not exist yet; will sync on next ArgoCD poll"
+
 log ""
-log "Bootstrap complete. Now create the incident-service secret:"
+log "============================================================"
+log "Bootstrap complete."
 log ""
-log "  printf '%s' 'sk-ant-...' > ~/anthropic-key.txt"
-log "  printf '%s' 'https://hooks.slack.com/services/...' > ~/slack-url.txt"
-log "  kubectl create secret generic incident-service-secrets \\"
-log "    --namespace=default \\"
-log "    --from-file=ANTHROPIC_API_KEY=\$HOME/anthropic-key.txt \\"
-log "    --from-file=SLACK_WEBHOOK_URL=\$HOME/slack-url.txt"
-log "  rm ~/anthropic-key.txt ~/slack-url.txt"
+log "Verify with:"
+log "  kubectl get application -n argocd"
+log "  kubectl get pods"
 log ""
-log "Then force ArgoCD to sync apps that depend on the secret:"
-log "  kubectl patch application incident-service -n argocd --type merge \\"
+log "Trigger demo with:"
+log "  sed -i 's/value: \"none\"/value: \"errors\"/' gitops/apps/payment-service/deployment.yaml"
+log "  git add gitops/apps/payment-service/deployment.yaml"
+log "  git commit -m 'demo: enable FAILURE_MODE=errors'"
+log "  git push"
+log "  kubectl patch application payment-service -n argocd --type merge \\"
 log "    -p '{\"metadata\":{\"annotations\":{\"argocd.argoproj.io/refresh\":\"hard\"}}}'"
+log "============================================================"

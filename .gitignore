@@ -30,3 +30,6 @@ Icon?
 # Saved Terraform plans
 tfplan*
 *.tfplan
+.incident-platform-secrets/
+anthropic-key
+slack-url
