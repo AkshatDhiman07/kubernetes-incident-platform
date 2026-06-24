@@ -18,11 +18,7 @@ End-to-end latency from alert firing to Slack message is typically under ten sec
 
 ## Architecture
 
-## Architecture
 
-<p align="center">
-  <img src="docs/architecture.png" alt="Architecture diagram" width="800">
-</p>
 
 GitOps via ArgoCD watches the `gitops/` folder in this repository. Every change to a microservice manifest, alert rule, or Application definition is reconciled into the cluster automatically. Direct `kubectl apply` is reserved for cluster bootstrap and read-only debugging.
 
