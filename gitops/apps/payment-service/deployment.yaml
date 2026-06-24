@@ -25,7 +25,7 @@ spec:
         - name: APP_VERSION
           value: "v0.3.0"
         - name: FAILURE_MODE
-          value: "errors"
+          value: "none"
         resources:
           requests:
             memory: "96Mi"
