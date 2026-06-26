@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: sqs-publisher
+  namespace: default
+  labels:
+    app: sqs-publisher
+    release: kube-prometheus-stack
+spec:
+  selector:
+    app: sqs-publisher
+  ports:
+  - port: 80
+    targetPort: http
+    protocol: TCP
+    name: http
+  type: ClusterIP
