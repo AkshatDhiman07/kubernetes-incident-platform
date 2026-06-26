@@ -18,13 +18,17 @@ spec:
       serviceAccountName: incident-service
       containers:
       - name: incident-service
-        image: 136492549275.dkr.ecr.us-east-1.amazonaws.com/incident-service:v0.3.0
+        image: 136492549275.dkr.ecr.us-east-1.amazonaws.com/incident-service:v0.4.0
         ports:
         - containerPort: 8080
           name: http
         env:
         - name: APP_VERSION
-          value: "v0.3.0"
+          value: "v0.4.0"
+        - name: AWS_REGION
+          value: "us-east-1"
+        - name: SQS_QUEUE_URL
+          value: "https://sqs.us-east-1.amazonaws.com/136492549275/incident-platform-alerts"
         - name: ANTHROPIC_API_KEY
           valueFrom:
             secretKeyRef:

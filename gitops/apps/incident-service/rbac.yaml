@@ -3,6 +3,8 @@ kind: ServiceAccount
 metadata:
   name: incident-service
   namespace: default
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::136492549275:role/incident-platform-incident-service-irsa
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole

@@ -1,15 +1,7 @@
-"""
-incident-service v0.4.0 — SQS consumer
-Receives alerts from SQS (populated by sqs-publisher), gathers context,
-calls Claude, posts to Slack. Includes deprecated HTTP webhook endpoint
-that returns 410 to detect misconfigured Alertmanager.
-"""
-from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request
 from prometheus_fastapi_instrumentator import Instrumentator
 from anthropic import Anthropic
 from kubernetes import client as k8s_client, config as k8s_config
-import boto3
 import httpx
 import os
 import logging
@@ -25,19 +17,15 @@ SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "")
 PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090")
 LOKI_URL = os.getenv("LOKI_URL", "http://loki.monitoring.svc.cluster.local:3100")
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
-SQS_QUEUE_URL = os.getenv("SQS_QUEUE_URL", "")
-AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 
 if not ANTHROPIC_API_KEY:
     log.warning("ANTHROPIC_API_KEY not set")
 if not SLACK_WEBHOOK_URL:
     log.warning("SLACK_WEBHOOK_URL not set")
-if not SQS_QUEUE_URL:
-    log.warning("SQS_QUEUE_URL not set — consumer loop will not start")
 
 claude = Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
-sqs = boto3.client("sqs", region_name=AWS_REGION) if SQS_QUEUE_URL else None
 
+# Load k8s config from inside the pod
 try:
     k8s_config.load_incluster_config()
     core_v1 = k8s_client.CoreV1Api()
@@ -50,13 +38,21 @@ except Exception as e:
     apps_v1 = None
     custom = None
 
+app = FastAPI(title="incident-service")
+Instrumentator().instrument(app).expose(app)
+
 _recent_incidents = {}
-_poller_task = None
 
 
-# ============================================================
-# Context gathering (unchanged from v0.3.0)
-# ============================================================
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+@app.get("/")
+def root():
+    return {"service": "incident-service", "version": os.getenv("APP_VERSION", "v0.3.0")}
+
 
 async def query_prometheus(client: httpx.AsyncClient, service: str) -> dict:
     queries = {
@@ -109,10 +105,16 @@ async def query_loki(client: httpx.AsyncClient, service: str) -> list:
 
 
 def query_k8s_events(service: str) -> list:
+    """Get recent K8s events for the affected service's pods."""
     if not core_v1:
         return []
     try:
-        all_events = core_v1.list_namespaced_event(namespace="default", limit=100)
+        events = core_v1.list_namespaced_event(
+            namespace="default",
+            field_selector=f"involvedObject.name~={service}",
+            limit=10,
+        )
+        # field_selector doesn't support regex everywhere; fallback to listing all and filtering
         return [
             {
                 "type": e.type,
@@ -121,15 +123,31 @@ def query_k8s_events(service: str) -> list:
                 "message": e.message,
                 "time": e.last_timestamp.isoformat() if e.last_timestamp else None,
             }
-            for e in all_events.items
+            for e in events.items
             if service in (e.involved_object.name or "")
-        ][-10:]
+        ][:10]
     except Exception as e:
-        log.warning(f"K8s events query failed: {e}")
-        return []
+        # Try fallback listing all events
+        try:
+            all_events = core_v1.list_namespaced_event(namespace="default", limit=100)
+            return [
+                {
+                    "type": e.type,
+                    "reason": e.reason,
+                    "object": f"{e.involved_object.kind}/{e.involved_object.name}",
+                    "message": e.message,
+                    "time": e.last_timestamp.isoformat() if e.last_timestamp else None,
+                }
+                for e in all_events.items
+                if service in (e.involved_object.name or "")
+            ][-10:]
+        except Exception as ee:
+            log.warning(f"K8s events query failed: {ee}")
+            return []
 
 
 def query_deployment_env(service: str) -> dict:
+    """Get current env vars of the service's deployment."""
     if not apps_v1:
         return {}
     try:
@@ -148,6 +166,7 @@ def query_deployment_env(service: str) -> dict:
 
 
 def query_argocd_status(service: str) -> dict:
+    """Get the ArgoCD Application status and last sync time."""
     if not custom:
         return {}
     try:
@@ -175,6 +194,7 @@ def query_argocd_status(service: str) -> dict:
 def build_prompt(alert: dict, prom: dict, logs: list, events: list, env: dict, argocd: dict) -> str:
     labels = alert.get("labels", {})
     annotations = alert.get("annotations", {})
+
     parts = [
         "You are an SRE diagnosing a live production incident on Kubernetes. Be specific and evidence-based.",
         "",
@@ -191,13 +211,15 @@ def build_prompt(alert: dict, prom: dict, logs: list, events: list, env: dict, a
     ]
     for k, v in prom.items():
         parts.append(f"  {k}: {'no data' if v is None else f'{v:.4f}'}")
+
     parts.append("")
     parts.append("=== DEPLOYMENT ENV VARS ===")
     if env:
         for k, v in env.items():
             parts.append(f"  {k}={v}")
     else:
-        parts.append("  (no env data)")
+        parts.append("  (no env data available)")
+
     parts.append("")
     parts.append("=== ARGOCD STATUS ===")
     if argocd:
@@ -205,6 +227,7 @@ def build_prompt(alert: dict, prom: dict, logs: list, events: list, env: dict, a
             parts.append(f"  {k}: {v}")
     else:
         parts.append("  (no ArgoCD data)")
+
     parts.append("")
     parts.append("=== KUBERNETES EVENTS ===")
     if events:
@@ -212,6 +235,7 @@ def build_prompt(alert: dict, prom: dict, logs: list, events: list, env: dict, a
             parts.append(f"  [{e.get('type')}] {e.get('reason')} on {e.get('object')}: {e.get('message', '')[:120]}")
     else:
         parts.append("  (no recent events)")
+
     parts.append("")
     parts.append("=== ERROR/WARN LOGS (last 5 min, up to 20) ===")
     if logs:
@@ -219,25 +243,29 @@ def build_prompt(alert: dict, prom: dict, logs: list, events: list, env: dict, a
             parts.append(f"  {line[:200]}")
     else:
         parts.append("  (no recent error logs)")
+
     parts.append("")
     parts.append("=== REQUIRED OUTPUT FORMAT ===")
-    parts.append("ROOT CAUSE: <one sentence>")
-    parts.append("EVIDENCE: <which specific metric/log/event/env-var supports this>")
+    parts.append("Provide your response in exactly this format. The EVIDENCE field must cite specific items from the context above.")
+    parts.append("")
+    parts.append("ROOT CAUSE: <one sentence describing the most likely cause>")
+    parts.append("EVIDENCE: <which specific metric/log/event/env-var supports this conclusion>")
     parts.append("CONFIDENCE: <low|medium|high>")
-    parts.append("WHY THIS CONFIDENCE: <one sentence>")
+    parts.append("WHY THIS CONFIDENCE: <one sentence justification>")
     parts.append("PROPOSED REMEDIATION:")
-    parts.append("  <kubectl command from this allowlist:>")
+    parts.append("  <a specific kubectl command from this allowlist:>")
     parts.append("    - kubectl rollout restart deployment/<name> -n default")
     parts.append("    - kubectl scale deployment/<name> --replicas=<N> -n default")
     parts.append("    - kubectl delete pod -l app=<name> -n default")
-    parts.append("  <or 'NO SAFE ACTION' if none would help>")
-    parts.append("NEXT STEPS FOR HUMAN: <what to investigate>")
+    parts.append("  <or write 'NO SAFE ACTION' if none of these would help>")
+    parts.append("NEXT STEPS FOR HUMAN: <what the on-call should investigate further>")
+
     return "\n".join(parts)
 
 
 def analyze_with_claude(prompt: str) -> str:
     if not claude:
-        return "AI analysis skipped (no API key)."
+        return "AI analysis skipped (no API key configured)."
     try:
         message = claude.messages.create(
             model=CLAUDE_MODEL,
@@ -252,19 +280,21 @@ def analyze_with_claude(prompt: str) -> str:
 
 async def post_to_slack(client: httpx.AsyncClient, alert: dict, analysis: str):
     if not SLACK_WEBHOOK_URL:
-        log.info("Slack webhook not configured")
+        log.info("Slack webhook not configured, skipping post")
         return
     labels = alert.get("labels", {})
     annotations = alert.get("annotations", {})
     severity = labels.get("severity", "unknown")
     emoji = {"critical": "🚨", "warning": "⚠️", "info": "ℹ️"}.get(severity, "📢")
+
     text = (
         f"{emoji} *{labels.get('alertname', 'Alert')}* — {severity}\n"
         f"*Service:* `{labels.get('service', 'unknown')}`\n"
         f"*Summary:* {annotations.get('summary', '')}\n\n"
         f"*AI Analysis:*\n```{analysis}```\n"
-        f"_AI suggestion. Review evidence before running commands._"
+        f"_This is an AI-generated suggestion. Review evidence before running any commands._"
     )
+
     try:
         r = await client.post(SLACK_WEBHOOK_URL, json={"text": text}, timeout=5.0)
         if r.status_code != 200:
@@ -280,7 +310,7 @@ async def process_alert(alert: dict):
     status = alert.get("status", "")
 
     if status == "resolved":
-        log.info(f"Skipping resolved: {alert_name}/{service}")
+        log.info(f"Skipping resolved alert: {alert_name}/{service}")
         return
 
     minute_bucket = int(datetime.now(timezone.utc).timestamp() // 60)
@@ -296,6 +326,7 @@ async def process_alert(alert: dict):
             query_loki(client, service),
         )
 
+    # K8s queries are sync (the client lib isn't async-native); run in executor
     loop = asyncio.get_event_loop()
     events = await loop.run_in_executor(None, query_k8s_events, service)
     env = await loop.run_in_executor(None, query_deployment_env, service)
@@ -326,123 +357,18 @@ async def process_alert(alert: dict):
         await post_to_slack(client, alert, analysis)
 
 
-# ============================================================
-# NEW IN V0.4.0: SQS poller
-# ============================================================
+@app.post("/webhook/alert")
+async def alert_webhook(request: Request):
+    body = await request.json()
+    alerts = body.get("alerts", [])
+    log.info(f"Received {len(alerts)} alert(s) from Alertmanager")
 
-async def process_sqs_message(message: dict):
-    """Parse one SQS message and process all alerts inside it."""
-    receipt_handle = message["ReceiptHandle"]
-    message_id = message.get("MessageId", "unknown")
-
-    try:
-        body = json.loads(message["Body"])
-        alerts = body.get("alerts", [])
-        log.info(f"Processing SQS message {message_id} with {len(alerts)} alert(s)")
-
-        # Process all alerts in the batch
+    async def run_all():
         await asyncio.gather(
             *(process_alert(a) for a in alerts),
             return_exceptions=True,
         )
 
-        # Only delete from SQS after ALL alerts processed successfully
-        # If process_alert raises, the message stays in SQS for retry after visibility timeout
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            None,
-            lambda: sqs.delete_message(QueueUrl=SQS_QUEUE_URL, ReceiptHandle=receipt_handle)
-        )
-        log.info(json.dumps({
-            "event": "sqs_message_processed",
-            "message_id": message_id,
-            "alert_count": len(alerts),
-        }))
-    except Exception as e:
-        log.error(f"SQS message processing failed for {message_id}: {type(e).__name__}: {e}")
-        # Don't delete — SQS will make it visible again after timeout
+    asyncio.create_task(run_all())
 
-
-async def sqs_poller():
-    """Long-polling loop that consumes messages from SQS."""
-    if not sqs or not SQS_QUEUE_URL:
-        log.warning("SQS not configured; poller not starting")
-        return
-
-    log.info(f"SQS poller starting for queue: {SQS_QUEUE_URL[-50:]}")
-    loop = asyncio.get_event_loop()
-
-    while True:
-        try:
-            # Long poll: wait up to 20 sec for messages
-            response = await loop.run_in_executor(
-                None,
-                lambda: sqs.receive_message(
-                    QueueUrl=SQS_QUEUE_URL,
-                    MaxNumberOfMessages=10,
-                    WaitTimeSeconds=20,
-                    VisibilityTimeout=60,
-                )
-            )
-
-            messages = response.get("Messages", [])
-            if messages:
-                log.info(f"Received {len(messages)} message(s) from SQS")
-                # Process all messages in parallel
-                await asyncio.gather(
-                    *(process_sqs_message(m) for m in messages),
-                    return_exceptions=True,
-                )
-        except Exception as e:
-            log.error(f"SQS poll error: {type(e).__name__}: {e}")
-            await asyncio.sleep(5)
-
-
-# ============================================================
-# Lifespan: start the SQS poller on app startup
-# ============================================================
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global _poller_task
-    _poller_task = asyncio.create_task(sqs_poller())
-    log.info("SQS poller started")
-    yield
-    log.info("SQS poller stopping")
-    if _poller_task:
-        _poller_task.cancel()
-        try:
-            await _poller_task
-        except asyncio.CancelledError:
-            pass
-
-
-app = FastAPI(title="incident-service", lifespan=lifespan)
-Instrumentator().instrument(app).expose(app)
-
-
-@app.get("/health")
-def health():
-    return {"status": "ok"}
-
-
-@app.get("/")
-def root():
-    return {
-        "service": "incident-service",
-        "version": os.getenv("APP_VERSION", "v0.4.0"),
-        "mode": "sqs-consumer",
-    }
-
-
-@app.post("/webhook/alert")
-async def alert_webhook_deprecated(request: Request):
-    """
-    Deprecated in v0.4.0: alerts now flow through SQS via sqs-publisher.
-    If Alertmanager hits this endpoint, it's misconfigured.
-    """
-    log.warning("DEPRECATED: /webhook/alert called directly. Alertmanager should be sending to sqs-publisher.")
-    raise HTTPException(
-        status_code=410,
-        detail="This endpoint is deprecated. Alerts now flow through sqs-publisher → SQS → this service.",
-    )
+    return {"status": "ok", "received": len(alerts)}
