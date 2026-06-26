@@ -164,7 +164,7 @@ stringData:
       group_wait: 10s
       group_interval: 30s
       repeat_interval: 1h
-      receiver: 'incident-service'
+      receiver: 'sqs-publisher'
       routes:
         - matchers: [alertname = "Watchdog"]
           receiver: 'null'
@@ -172,9 +172,9 @@ stringData:
           receiver: 'null'
     receivers:
       - name: 'null'
-      - name: 'incident-service'
+      - name: 'sqs-publisher'
         webhook_configs:
-          - url: 'http://incident-service.default.svc.cluster.local/webhook/alert'
+          - url: 'http://sqs-publisher.default.svc.cluster.local/webhook/alert'
             send_resolved: true
 AMEOF
 
