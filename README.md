@@ -20,7 +20,7 @@ End-to-end latency from alert firing to Slack message is typically under ten sec
 
 
 <p align="center">
-  <img src="docs/architecture.png" alt="Architecture diagram" width="800">
+  <img src="docs/v2-achitecture.png" alt="Architecture diagram" width="800">
 </p>
 
 
