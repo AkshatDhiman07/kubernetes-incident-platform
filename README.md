@@ -2,37 +2,41 @@
 
 An AI-powered incident response system on Amazon EKS that detects production failures, gathers context across metrics and logs, generates a structured root cause analysis using Claude, and posts the diagnosis to Slack within seconds of an alert firing.
 
-This repository is a portfolio project that demonstrates end-to-end cloud-native engineering: infrastructure-as-code, GitOps, observability, alerting, and an LLM integration that turns raw alert metadata into actionable triage steps.
+This repository is a portfolio project that demonstrates end-to-end cloud-native engineering: infrastructure-as-code, GitOps, observability, event-driven alert processing with Amazon SQS, and an LLM integration that turns raw alert metadata into actionable triage steps.
 
 ## What it does
 
 When a microservice in the cluster starts misbehaving (elevated 5xx error rate, increased latency, pod restart loop), the platform:
 
 1. Detects the failure via Prometheus alert rules.
-2. Receives the alert through Alertmanager and forwards it to a custom incident-service webhook running in the cluster.
-3. Gathers context in parallel by querying Prometheus for recent metrics (error rate, request rate, p95 latency) and Loki for the last five minutes of error and warning logs from the affected service.
-4. Calls the Anthropic Claude API with a structured prompt containing the alert metadata, metrics, and log excerpts.
-5. Parses the response and posts a formatted message to a Slack channel with the root cause, confidence level, and a list of recommended actions an on-call engineer can take immediately.
+2. Receives the alert through Alertmanager and forwards it via HTTP webhook to an in-cluster `sqs-publisher` service.
+3. The publisher enqueues the alert to an Amazon SQS queue, decoupling ingestion from processing.
+4. The `incident-service` polls SQS via long polling and consumes the queued alert.
+5. Gathers context in parallel by querying Prometheus for recent metrics (error rate, request rate, p95 latency), Loki for the last five minutes of error and warning logs, and the Kubernetes API for the deployment's current environment variables and recent events.
+6. Calls the Anthropic Claude API with a structured prompt containing the alert metadata, metrics, logs, deployment configuration, and ArgoCD sync state.
+7. Parses the response and posts a formatted message to a Slack channel with the root cause, cited evidence, confidence level, and a specific kubectl remediation command drawn from a hardcoded safety allowlist.
 
-End-to-end latency from alert firing to Slack message is typically under ten seconds.
+End-to-end latency from alert firing to Slack message is typically under ten seconds. The SQS queue absorbs any temporary unavailability of the incident-service; alerts persist in the queue and are reprocessed when the consumer recovers.
 
 ## Architecture
-
 
 <p align="center">
   <img src="docs/v2-achitecture.png" alt="Architecture diagram" width="800">
 </p>
 
-
 GitOps via ArgoCD watches the `gitops/` folder in this repository. Every change to a microservice manifest, alert rule, or Application definition is reconciled into the cluster automatically. Direct `kubectl apply` is reserved for cluster bootstrap and read-only debugging.
+
+The processing pipeline is event-driven. The `sqs-publisher` service translates Alertmanager's HTTP webhook into an SQS message and returns immediately, isolating Alertmanager from any downstream processing latency. The `incident-service` consumes from the queue at its own pace, processes one alert at a time (gathering context, calling Claude, posting to Slack), and only deletes the message from SQS after the full pipeline succeeds. If the consumer crashes or restarts mid-processing, the SQS visibility timeout returns the message to the queue and the next consumer picks it up. There is no in-process state that needs to survive a pod restart.
+
+Both services authenticate to AWS via IRSA (IAM Roles for Service Accounts). The ServiceAccount in Kubernetes is annotated with the ARN of an IAM role; the EKS pod identity webhook injects temporary AWS credentials into the pod via STS AssumeRoleWithWebIdentity. No static AWS credentials are stored in the cluster.
 
 ## Technology stack
 
-Infrastructure is provisioned with Terraform: a VPC with public and private subnets across two availability zones, an EKS cluster running Kubernetes 1.31 on Spot-priced t3.medium nodes, ECR repositories for application images, and IAM roles for IRSA. Remote state is stored in S3 with native state locking via `use_lockfile`.
+Infrastructure is provisioned with Terraform: a VPC with public and private subnets across two availability zones, an EKS cluster running Kubernetes 1.31 on Spot-priced t3.medium nodes, ECR repositories for application images, an SQS queue for the alert ingestion path, and IAM roles for IRSA. Remote state is stored in S3 with native state locking via `use_lockfile`.
 
-The cluster runs ArgoCD for GitOps, kube-prometheus-stack for metrics and alerting, Loki with Promtail for log aggregation, and the EBS CSI driver for persistent volume provisioning. All three observability components are installed via Helm with sized resource requests and limits to fit within the t3.medium pod-per-node budget.
+The cluster runs ArgoCD for GitOps, kube-prometheus-stack for metrics and alerting, Loki with Promtail for log aggregation, and the EBS CSI driver for persistent volume provisioning. All observability components are installed via Helm with sized resource requests and limits to fit within the t3.medium pod-per-node budget.
 
-Application services are written in Python with FastAPI and instrumented with prometheus-fastapi-instrumentator. The incident-service additionally uses httpx for async HTTP calls to Prometheus, Loki, and Slack, and the official Anthropic Python SDK for the Claude API.
+Application services are written in Python with FastAPI and instrumented with prometheus-fastapi-instrumentator. The incident-service uses httpx for async HTTP calls to Prometheus, Loki, and Slack, the official Kubernetes Python client for the K8s API, boto3 for SQS polling, and the official Anthropic Python SDK for the Claude API. The sqs-publisher uses FastAPI and boto3 to translate webhooks into SQS messages.
 
 ## Repository layout
 
@@ -42,19 +46,23 @@ kubernetes-incident-platform/
 │   ├── payment-service/          FastAPI service with FAILURE_MODE injection
 │   ├── order-service/            FastAPI service that calls payment-service
 │   ├── load-generator/           Continuous traffic at 5 req/s
-│   └── incident-service/         Webhook receiver + AI analysis + Slack output
+│   ├── sqs-publisher/            Receives Alertmanager webhooks, enqueues to SQS
+│   └── incident-service/         SQS consumer, AI analysis, Slack output
 ├── gitops/
 │   ├── apps/
 │   │   ├── payment-service/      Deployment, Service, ServiceMonitor
 │   │   ├── order-service/        Deployment, Service, ServiceMonitor
 │   │   ├── load-generator/       Deployment
-│   │   ├── incident-service/     Deployment, Service, ServiceMonitor
+│   │   ├── sqs-publisher/        Deployment, Service, ServiceMonitor, SA with IRSA
+│   │   ├── incident-service/     Deployment, Service, ServiceMonitor, SA with IRSA
 │   │   ├── alert-rules/          PrometheusRule objects (6 alerts total)
 │   │   └── nginx-demo/           Sanity-check workload
 │   └── argocd-apps/              ArgoCD Application definitions
 ├── terraform/
-│   └── environments/dev/         VPC + EKS + ECR + IAM
-└── docs/                         Architecture diagrams and notes
+│   └── environments/dev/         VPC + EKS + ECR + SQS + IAM
+├── scripts/
+│   └── bootstrap.sh              Sequenced cluster setup (CSI, Helm, ArgoCD, Alertmanager)
+└── docs/                         Architecture diagrams, design notes, runbooks
 ```
 
 ## Setup
@@ -70,13 +78,21 @@ terraform plan -out=tfplan.binary
 terraform apply tfplan.binary
 ```
 
-This provisions the VPC, EKS cluster, ECR repositories, and IAM roles. Expect fifteen to eighteen minutes.
+This provisions the VPC, EKS cluster, ECR repositories, the SQS queue, and IAM roles for IRSA. Expect fifteen to eighteen minutes.
 
 Wire kubectl to the new cluster:
 
 ```
 aws eks update-kubeconfig --region us-east-1 --name incident-platform-dev-cluster
 kubectl get nodes
+```
+
+Capture the Terraform outputs you'll need for the rest of the setup:
+
+```
+terraform output sqs_queue_url
+terraform output sqs_publisher_role_arn
+terraform output incident_service_role_arn
 ```
 
 ### 2. Install the EBS CSI driver
@@ -174,11 +190,11 @@ Wait sixty to ninety seconds for ArgoCD to reconcile, then verify:
 kubectl get application -n argocd
 ```
 
-All applications should report `Synced` and `Healthy`.
+All applications should report `Synced` and `Healthy`. This includes both `sqs-publisher` and `incident-service`.
 
-### 5. Configure Alertmanager to route to incident-service
+### 5. Configure Alertmanager to route to sqs-publisher
 
-The default kube-prometheus-stack ships an Alertmanager configuration that routes every alert to a null receiver. Replace it with a webhook config that forwards real alerts to the incident-service.
+The default kube-prometheus-stack ships an Alertmanager configuration that routes every alert to a null receiver. Replace it with a webhook config that forwards real alerts to the sqs-publisher, which enqueues them to SQS for the incident-service to consume.
 
 ```
 kubectl apply -f - <<EOF
@@ -196,7 +212,7 @@ stringData:
       group_wait: 10s
       group_interval: 30s
       repeat_interval: 1h
-      receiver: 'incident-service'
+      receiver: 'sqs-publisher'
       routes:
         - matchers: [alertname = "Watchdog"]
           receiver: 'null'
@@ -204,9 +220,9 @@ stringData:
           receiver: 'null'
     receivers:
       - name: 'null'
-      - name: 'incident-service'
+      - name: 'sqs-publisher'
         webhook_configs:
-          - url: 'http://incident-service.default.svc.cluster.local/webhook/alert'
+          - url: 'http://sqs-publisher.default.svc.cluster.local/webhook/alert'
             send_resolved: true
 EOF
 
@@ -233,6 +249,8 @@ kubectl create secret generic incident-service-secrets \
 rm /tmp/anthropic-key.txt /tmp/slack-url.txt
 ```
 
+AWS credentials for SQS access are not stored as secrets; both `sqs-publisher` and `incident-service` authenticate via IRSA, which the Terraform module provisioned in step 1.
+
 ### 7. Verify end-to-end
 
 Trigger a real incident by enabling failure mode in payment-service via git:
@@ -244,7 +262,22 @@ git commit -m "test: enable FAILURE_MODE=errors"
 git push
 ```
 
-ArgoCD picks up the change within thirty seconds and rolls a new payment-service pod that returns 500s on thirty percent of requests. After roughly two minutes of sustained errors (matching the `for: 2m` window in the alert rule), `PaymentServiceHighErrorRate` fires. Alertmanager forwards it to incident-service, which gathers context and posts the analysis to Slack.
+ArgoCD picks up the change within thirty seconds and rolls a new payment-service pod that returns 500s on thirty percent of requests. After roughly two minutes of sustained errors (matching the `for: 2m` window in the alert rule), `PaymentServiceHighErrorRate` fires. Alertmanager forwards it to sqs-publisher, which enqueues the alert to SQS. The incident-service consumes the message via long polling, gathers context, calls Claude, posts the analysis to Slack, and deletes the message from SQS only after successful processing.
+
+You can watch the queue depth change in real time:
+
+```
+while true; do
+  printf "%s  count=" "$(date +%H:%M:%S)"
+  aws sqs get-queue-attributes \
+    --queue-url "$(cd terraform/environments/dev && terraform output -raw sqs_queue_url)" \
+    --attribute-names ApproximateNumberOfMessages \
+    --region us-east-1 \
+    --query 'Attributes.ApproximateNumberOfMessages' \
+    --output text
+  sleep 2
+done
+```
 
 Restore normal behavior by reverting:
 
@@ -257,9 +290,13 @@ git push
 
 ## Key design decisions
 
-**Why Prometheus + Loki and not just one?** Metrics tell you what is wrong: the error rate is elevated, latency is climbing, requests are failing. Logs tell you why: the exception trace, the configuration value, the downstream service that returned a malformed response. Giving Claude both signals produces materially better root cause analyses than either alone. The smoke test with empty context produced generic responses; the real test with metrics plus twenty log lines produced specific, actionable recommendations.
+**Why SQS between Alertmanager and the consumer?** A direct HTTP webhook from Alertmanager to the incident-service couples ingestion to processing. If the incident-service crashes between receiving the alert and finishing the Claude call, the alert is lost — Alertmanager has already received its 200 OK and will not retry. With SQS in between, the publisher returns 200 the instant the message is enqueued, and the consumer processes at its own pace. A crash mid-processing returns the message to the queue after the visibility timeout; the next consumer picks it up.
 
-**Why a custom webhook service instead of Alertmanager's built-in Slack integration?** Alertmanager can post alerts to Slack natively, but only as raw alert text. The whole point of this project is the analysis layer between alert and human: gathering context, calling the LLM, and producing a structured triage message. That requires custom code, and a webhook receiver inside the cluster is the cleanest place for it.
+**Why a separate sqs-publisher service instead of merging it into the incident-service?** Separation of concerns. The publisher's job is to translate HTTP into a queue message — no business logic, no LLM calls, no Slack interaction. It can scale, fail, or be restarted independently of the consumer. Bugs in the analysis code do not affect alert ingestion. The publisher is also a sensible place to add validation or rate limiting in the future without touching the consumer.
+
+**Why IRSA instead of static AWS credentials in Kubernetes Secrets?** Static credentials are a security and operational burden: rotation is manual, leaks are catastrophic, and audit logging is impossible from inside the cluster. IRSA gives each pod a unique IAM identity, derived from its ServiceAccount and the cluster's OIDC issuer, with temporary credentials that AWS rotates automatically. The blast radius of a compromised pod is limited to that pod's specific IAM policy. No long-lived AWS keys live in the cluster.
+
+**Why Prometheus + Loki and not just one?** Metrics tell you what is wrong: the error rate is elevated, latency is climbing, requests are failing. Logs tell you why: the exception trace, the configuration value, the downstream service that returned a malformed response. Giving Claude both signals produces materially better root cause analyses than either alone. The smoke test with empty context produced generic responses; the real test with metrics plus twenty log lines produced specific, actionable recommendations.
 
 **Why GitOps with ArgoCD instead of `kubectl apply` in CI?** Every change to running state is a git commit. The cluster's state at any moment is determined by what is in the `gitops/` folder of the repository. This catches a class of bugs where someone applies a change locally, forgets to commit, and the cluster diverges from the source of truth. It also makes rollback trivial: revert the commit and ArgoCD reverts the cluster.
 
@@ -267,21 +304,27 @@ git push
 
 **Why filter out resolved alerts?** When `FAILURE_MODE` is reverted, Alertmanager sends a `resolved` status notification with `send_resolved: true`. Sending these to Claude wastes credits because there is nothing to diagnose; the system is fine again. The webhook handler skips alerts with `status == "resolved"` before calling Claude.
 
+**Why a hardcoded remediation allowlist?** Claude proposes a kubectl command as part of every analysis, but the command must come from a fixed list of three reversible operations: rollout restart, scale, or delete pod. The allowlist lives in the Python code, not in the prompt — even if the prompt were compromised or the model misbehaved, the service would not produce a destructive command. AI proposes; humans decide what runs.
+
 ## Cost discipline
 
-The cluster is destroyed and recreated nightly. Monthly spend stays under twenty dollars in development. Spot-priced t3.medium nodes, a single NAT gateway, Loki with a 5Gi EBS volume, and a two-day Prometheus retention window keep costs predictable. The Anthropic API costs roughly a cent per analysis with Claude Haiku.
+The cluster is destroyed and recreated nightly. Monthly spend stays under twenty dollars in development. Spot-priced t3.medium nodes, a single NAT gateway, Loki with a 5Gi EBS volume, and a two-day Prometheus retention window keep costs predictable. The Anthropic API costs roughly a cent per analysis with Claude Haiku. The SQS queue costs less than a dollar per month at this scale.
 
 The bootstrap sequence above takes thirty to forty minutes from `terraform apply` to first Slack message. Once familiar with it, a full daily cycle (apply, develop, test, destroy) fits inside three hours.
 
 ## Known limitations and what I would do differently
 
-The Anthropic API key and Slack webhook URL are stored as a Kubernetes Secret in the cluster. A production deployment would store them in AWS Secrets Manager and grant the incident-service permission to read them via IRSA. This adds about thirty minutes of setup (IAM role, OIDC trust policy, service account binding) and a small amount of code to fetch the secret at startup, but it gains audit logging, rotation, and proper encryption at rest. The current setup is documented as a deliberate scope decision.
+The Anthropic API key and Slack webhook URL are stored as a Kubernetes Secret in the cluster. A production deployment would store them in AWS Secrets Manager and grant the incident-service permission to read them via the existing IRSA role. This adds about thirty minutes of setup and a small amount of code to fetch the secret at startup, but it gains audit logging, rotation, and proper encryption at rest. The current setup is documented as a deliberate scope decision.
 
 The kube-prometheus-stack ships several alerts that fire on every EKS cluster because AWS does not expose the metrics endpoint for the control plane components it manages. `KubeSchedulerDown` and `KubeControllerManagerDown` are two examples. In a real deployment these would be silenced via Alertmanager inhibit rules or disabled in the Helm values. They are left enabled here to demonstrate that the platform handles unfamiliar alert names gracefully.
 
 The Alertmanager configuration lives in a `kubectl apply`-d secret rather than in the Helm values. Reinstalling the Prometheus stack overwrites the secret with defaults and the custom routing is lost until it is reapplied. The proper fix is to configure Alertmanager via the chart's `alertmanager.config` block in a values file.
 
 The dedup cache in incident-service is in-memory and disappears on pod restart. A production deployment would back this with Redis or a small relational store, also useful for an incident history view.
+
+The SQS queue has no dead-letter queue configured. In production, messages that fail to process repeatedly should be routed to a DLQ for inspection rather than cycling indefinitely on the visibility timeout. This was deferred for simplicity but is a five-minute Terraform addition.
+
+Both `sqs-publisher` and `incident-service` run as single replicas. Production deployments would run multiple replicas of each. SQS handles consumer concurrency natively — multiple consumers can poll the same queue and SQS guarantees each message is delivered to one consumer at a time.
 
 The `ServiceMonitor` for kube-scheduler and kube-controller-manager would be disabled in a real cluster to silence the false-positive alerts described above. They are kept here so the incident-service can be observed handling a variety of alert sources.
 
@@ -291,8 +334,7 @@ The biggest lesson was about ordering. EKS does not include the EBS CSI driver, 
 
 The second lesson was about secret hygiene. Early in this project an API key was typed into a shell that was visible in a screenshot. The key was rotated within minutes, and the incident became a useful habit: secrets are loaded from files via `--from-file`, never typed inline, never echoed, never committed. The same applies to the Slack webhook URL.
 
-The third lesson was about LLM integration as an engineering discipline rather than a magic ingredient. Claude's first responses, given only the alert text, were generic. Adding Prometheus metrics changed the responses to be quantitatively grounded. Adding Loki log lines changed them again, this time to reference specific error patterns from the logs. Each layer of context produced a measurably better answer. The prompt itself is short and structured: alert metadata, metrics block, log block, and a required output format with root cause, confidence, and recommended actions. The model fills in the rest reliably.
+The third lesson was about LLM integration as an engineering discipline rather than a magic ingredient. Claude's first responses, given only the alert text, were generic. Adding Prometheus metrics changed the responses to be quantitatively grounded. Adding Loki log lines and Kubernetes deployment context changed them again, this time to reference specific environment variables and error patterns. Each layer of context produced a measurably better answer. The prompt itself is short and structured: alert metadata, metrics block, log block, deployment env block, ArgoCD status block, and a required output format with root cause, evidence, confidence, and a remediation command. The model fills in the rest reliably.
 
-## License
+The fourth lesson was about reliability through decoupling. The first design had Alertmanager POSTing directly to the incident-service. A single pod crash mid-processing would lose the alert silently. Introducing SQS in between turned a coupled synchronous chain into a queue-based pipeline. The same architectural pattern — a durable buffer between producer and consumer — is what makes event-driven systems robust in production.
 
-This project is provided as a portfolio sample. The infrastructure code, application code, and manifests are free to use and adapt. The Anthropic API and Slack webhook keys are your responsibility; do not commit them to any repository.
