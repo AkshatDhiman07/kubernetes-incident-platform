@@ -5,7 +5,7 @@ resource "aws_sqs_queue" "alerts" {
   message_retention_seconds  = 345600  # 4 days
   
   tags = {
-    Purpose = "Alertmanager → incident-service durability layer"
+    Purpose = "Durability layer between Alertmanager and incident-service"
   }
 }
 

@@ -33,3 +33,4 @@ tfplan*
 .incident-platform-secrets/
 anthropic-key
 slack-url
+.v2-state/
