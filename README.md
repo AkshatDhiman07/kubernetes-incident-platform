@@ -1,8 +1,30 @@
 # Kubernetes Incident Response Platform
 
+[![Demo Video](https://img.shields.io/badge/Demo-YouTube-red?logo=youtube&logoColor=white)](https://www.youtube.com/watch?v=1qUeKQUrCTQ)
+[![LinkedIn](https://img.shields.io/badge/LinkedIn-Connect-blue?logo=linkedin&logoColor=white)](https://www.linkedin.com/in/akshat-dhiman-297b13190)
+[![AWS](https://img.shields.io/badge/AWS-EKS-orange?logo=amazonaws&logoColor=white)](https://aws.amazon.com/eks/)
+[![Kubernetes](https://img.shields.io/badge/Kubernetes-1.31-blue?logo=kubernetes&logoColor=white)](https://kubernetes.io/)
+[![Terraform](https://img.shields.io/badge/Terraform-1.5+-purple?logo=terraform&logoColor=white)](https://www.terraform.io/)
+[![ArgoCD](https://img.shields.io/badge/GitOps-ArgoCD-EF7B4D?logo=argo&logoColor=white)](https://argo-cd.readthedocs.io/)
+[![Claude](https://img.shields.io/badge/AI-Claude-D97757)](https://www.anthropic.com/)
+
 An AI-powered incident response system on Amazon EKS that detects production failures, gathers context across metrics and logs, generates a structured root cause analysis using Claude, and posts the diagnosis to Slack within seconds of an alert firing.
 
 This repository is a portfolio project that demonstrates end-to-end cloud-native engineering: infrastructure-as-code, GitOps, observability, event-driven alert processing with Amazon SQS, and an LLM integration that turns raw alert metadata into actionable triage steps.
+
+## Demo
+
+A full walkthrough of the platform is available on YouTube — covering the architecture, a live failure injection, and Claude's diagnosis in detail.
+
+[![Watch the demo](https://img.youtube.com/vi/1qUeKQUrCTQ/maxresdefault.jpg)](https://www.youtube.com/watch?v=1qUeKQUrCTQ)
+
+▶ **[Watch the full walkthrough on YouTube](https://www.youtube.com/watch?v=1qUeKQUrCTQ)**
+
+### What the demo shows
+
+The video walks through the system in three parts. First, the healthy state — ArgoCD managing five applications, Prometheus alert rules all Inactive, Slack channel quiet. Then a real failure is injected by setting `FAILURE_MODE=errors` on the payment-service via a single git commit. ArgoCD reconciles, the pod rolls, error rates spike, the Prometheus alert moves Pending then Firing. Finally, Claude's analysis arrives in Slack with the root cause identified, evidence cited from the deployment's environment variables and log lines, a confidence level, and a specific kubectl remediation command from a hardcoded safety allowlist.
+
+End-to-end from `git push` to Slack message: under five minutes including the two-minute Prometheus hold window. Once the alert is firing, the diagnosis arrives in Slack in under ten seconds.
 
 ## What it does
 
@@ -21,7 +43,7 @@ End-to-end latency from alert firing to Slack message is typically under ten sec
 ## Architecture
 
 <p align="center">
-  <img src="docs/v2-achitecture.png" alt="Architecture diagram" width="800">
+  <img src="docs/architecture.png" alt="Architecture diagram" width="800">
 </p>
 
 GitOps via ArgoCD watches the `gitops/` folder in this repository. Every change to a microservice manifest, alert rule, or Application definition is reconciled into the cluster automatically. Direct `kubectl apply` is reserved for cluster bootstrap and read-only debugging.
@@ -337,4 +359,12 @@ The second lesson was about secret hygiene. Early in this project an API key was
 The third lesson was about LLM integration as an engineering discipline rather than a magic ingredient. Claude's first responses, given only the alert text, were generic. Adding Prometheus metrics changed the responses to be quantitatively grounded. Adding Loki log lines and Kubernetes deployment context changed them again, this time to reference specific environment variables and error patterns. Each layer of context produced a measurably better answer. The prompt itself is short and structured: alert metadata, metrics block, log block, deployment env block, ArgoCD status block, and a required output format with root cause, evidence, confidence, and a remediation command. The model fills in the rest reliably.
 
 The fourth lesson was about reliability through decoupling. The first design had Alertmanager POSTing directly to the incident-service. A single pod crash mid-processing would lose the alert silently. Introducing SQS in between turned a coupled synchronous chain into a queue-based pipeline. The same architectural pattern — a durable buffer between producer and consumer — is what makes event-driven systems robust in production.
+
+## Connect
+
+If you are working on AI-augmented DevOps tooling, observability, or SRE automation, I would love to hear what you are building.
+
+- 📺 **Demo walkthrough:** [YouTube](https://www.youtube.com/watch?v=1qUeKQUrCTQ)
+- 💼 **LinkedIn:** [linkedin.com/in/akshat-dhiman-297b13190](https://www.linkedin.com/in/akshat-dhiman-297b13190)
+- 🐙 **GitHub:** [github.com/AkshatDhiman07](https://github.com/AkshatDhiman07)
 
